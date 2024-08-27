@@ -1,95 +1,80 @@
 package projects
 
 import (
-	"database/sql"
 	"encoding/json"
 	"github.com/gorilla/mux"
-	"go_app/models"
-	"log"
+	"go_app/dto"
+	"go_app/services/users"
 	"net/http"
 	"strconv"
 )
 
-// Response models
-
-type CreateProjectResponse struct {
-	Id int `json:"id"`
-}
-
-type GetProjectByIdResponse struct {
-	Project *models.Project `json:"project"`
-}
-
-type GetProjectsByUserIdResponse struct {
-	Projects []models.Project `json:"projects"`
-}
-
 type ProjectsService struct {
-	db *sql.DB
+	store ProjectsStore
 }
 
-func NewProjectsService(db *sql.DB) *ProjectsService {
+func NewProjectsService(store ProjectsStore) *ProjectsService {
 	return &ProjectsService{
-		db: db,
+		store: store,
 	}
 }
-
-// Endpoint handlers
 
 func (s ProjectsService) CreateProjectHandler(w http.ResponseWriter, r *http.Request) {
-	var project models.Project
-	err := json.NewDecoder(r.Body).Decode(&project)
-
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	id, err := CreateProject(s.db, project.Name, project.Desc, project.UserId)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	var response = CreateProjectResponse{
-		Id: id,
-	}
-
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(response)
-}
-
-func (s ProjectsService) GetProjectByIdHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(mux.Vars(r)["id"])
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-	}
-
-	project, _ := GetProjectById(s.db, id)
-
-	var response = GetProjectByIdResponse{
-		project,
-	}
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
-}
 
-func (s ProjectsService) GetProjectsByUserIdHandler(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	var body dto.ProjectRequest
+	err := json.NewDecoder(r.Body).Decode(&body)
+
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(err.Error()))
+
+		var response = dto.ErrorResponse{
+			http.StatusText(http.StatusBadRequest),
+			http.StatusBadRequest,
+		}
+
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
-	projects, err := GetProjectsByUserId(s.db, id)
+	id, err := s.store.CreateProject(body.Name, body.Desc, body.UserId)
 	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+		w.WriteHeader(http.StatusBadRequest)
+
+		var response = dto.ErrorResponse{
+			http.StatusText(http.StatusBadRequest),
+			http.StatusBadRequest,
+		}
+
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 
-	var response = GetProjectsByUserIdResponse{
-		projects,
+	var response = dto.ProjectResponse{
+		id,
+		body.Name,
+		body.Desc,
+		body.UserId,
+		nil,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s ProjectsService) GetProjectHandler(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+
+	project, _ := s.store.GetProject(id)
+
+	var response = dto.ProjectResponse{
+		project.Id,
+		project.Name,
+		project.Desc,
+		project.UserId,
+		nil,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -102,62 +87,55 @@ func (s ProjectsService) DeleteProjectHandler(w http.ResponseWriter, r *http.Req
 		w.WriteHeader(http.StatusBadRequest)
 	}
 
-	project, err := GetProjectById(s.db, id)
+	project, err := s.store.GetProject(id)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		return
 	}
 
-	json.NewEncoder(w).Encode(project)
+	if project == nil {
+		w.Write([]byte("Project not found"))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	err = s.store.DeleteProject(project.Id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Project deleted"))
 }
 
-// DB Helpers
+func (s ProjectsService) GetProjectsByUserHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 
-func CreateProject(db *sql.DB, name string, desc string, userId int) (int, error) {
-	var query = "Insert into `projects` (`name`, `desc`, `userId`) values (?, ?, ?)"
-	result, err := db.Exec(query, name, desc, userId)
-
-	if err != nil {
-		return 0, err
-	}
-
-	id, err := result.LastInsertId()
+	var token = r.Header.Get("Authorization")
+	claims, err := users.ValidJWT(token)
 
 	if err != nil {
-		return 0, err
-	}
+		w.WriteHeader(http.StatusBadRequest)
 
-	return int(id), nil
-}
-
-func GetProjectsByUserId(db *sql.DB, userId int) ([]models.Project, error) {
-	var projects []models.Project
-	var query = "select * from projects where `userId` = ?"
-	rows, err := db.Query(query, userId)
-	if err != nil {
-		return nil, err
-	}
-
-	for rows.Next() {
-		var project models.Project
-		err := rows.Scan(&project.Id, &project.Name, &project.Desc, &project.UserId)
-		if err != nil {
-			log.Fatal(err)
+		var response = dto.ErrorResponse{
+			Code:    http.StatusBadRequest,
+			Message: http.StatusText(http.StatusBadRequest),
 		}
 
-		projects = append(projects, project)
+		json.NewEncoder(w).Encode(response)
+		return
 	}
 
-	return projects, nil
-}
-
-func GetProjectById(db *sql.DB, id int) (*models.Project, error) {
-	project := models.Project{}
-	var query = "select * from projects where `id` = ?"
-	row := db.QueryRow(query, id)
-	err := row.Scan(&project.Id, &project.Name, &project.Desc, &project.UserId)
+	projects, err := s.store.GetProjectsByUser(claims.UserId)
 	if err != nil {
-		return nil, err
+		w.WriteHeader(http.StatusInternalServerError)
 	}
 
-	return &project, nil
+	var response = dto.GetProjectsByUserResponse{
+		projects,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
